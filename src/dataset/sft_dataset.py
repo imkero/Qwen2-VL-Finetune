@@ -110,7 +110,6 @@ class SupervisedDataset(Dataset):
 
             videos = []
             for video_file in video_files:
-                video_file = process_video_item(video_file)
                 if isinstance(video_file, list):
                     video_file = [process_video_item(i) for i in video_file]
                 else:
