@@ -113,18 +113,27 @@ class ClassificationDataset(Dataset):
         elif "video" in sources:
             video_files = sources["video"]
             video_folder = self.data_args.image_folder
+            video_fps = sources.get("fps", self.fps)
+
+            def process_video_item(video_file):
+                if video_file.startswith(("http:", "https:")):
+                    return video_file
+                
+                if os.path.exists(video_file):
+                    return video_file
+                
+                new_video_file = os.path.join(video_folder, video_file)
+                if not os.path.exists(new_video_file):
+                    raise Exception(f"video file [{video_file}] not exists")
+                
+                return new_video_file
 
             if isinstance(video_files, str):
-                video_files = [video_files]
-
-            frame_paths = []
-            for video_file in video_files:
-                if not os.path.exists(video_file):
-                    if not video_file.startswith("http"):
-                        video_file = os.path.join(video_folder, video_file)
-                    frame_paths.append(video_file)
+                video = process_video_item(video_files)
+            else:
+                video = [process_video_item(i) for i in video_files]
             
-            contents.append(get_video_content(frame_paths, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, self.fps, self.nframes))
+            contents.append(get_video_content(video, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, video_fps, self.nframes))
 
         if "prompt" in sources:
             text_content = {"type": "text", "text": sources["prompt"]}

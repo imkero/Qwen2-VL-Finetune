@@ -80,22 +80,40 @@ class DPODataset(Dataset):
 
         elif "video" in sources:
             is_video = True
-            images=None
+            images = None
             grid_key = "video_grid_thw"
             pixel_key = "pixel_values_videos"
 
             video_files = sources["video"]
             video_folder = self.data_args.image_folder
 
+            video_fps = sources.get("fps", self.fps)
+
             if isinstance(video_files, str):
                 video_files = [video_files]
 
+            def process_video_item(video_file):
+                if video_file.startswith(("http:", "https:")):
+                    return video_file
+                
+                if os.path.exists(video_file):
+                    return video_file
+                
+                new_video_file = os.path.join(video_folder, video_file)
+                if not os.path.exists(new_video_file):
+                    raise Exception(f"video file [{video_file}] not exists")
+                
+                return new_video_file
+
             videos = []
             for video_file in video_files:
-                if not os.path.exists(video_file):
-                    if not video_file.startswith("http"):
-                        video_file = os.path.join(video_folder, video_file)
-                video_input, video_kwargs = get_video_info(video_file, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, self.fps, self.nframes)
+                video_file = process_video_item(video_file)
+                if isinstance(video_file, list):
+                    video_file = [process_video_item(i) for i in video_file]
+                else:
+                    video_file = process_video_item(video_file)
+
+                video_input, video_kwargs = get_video_info(video_file, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, video_fps, self.nframes)
                 videos.append(video_input)
         else:
             grid_key = None
