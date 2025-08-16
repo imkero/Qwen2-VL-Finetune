@@ -135,6 +135,29 @@ class TrainingArguments(HFTrainingArguments):
     num_lora_modules: int = -1
     use_liger: bool = True
 
+    label_smoothing_ce: float = field(
+        default=0.0,
+        metadata={"help": "Label smoothing value for cross-entropy"}
+    )
+
+    label_smoothing_fl: float = field(
+        default=0.0,
+        metadata={"help": "Label smoothing value for focal loss"}
+    )
+
+    focal_gamma: float = field(
+        default=2.0,
+        metadata={"help": "gamma for focal loss"}
+    )
+    focal_alpha: float = field(
+        default=0.25,
+        metadata={"help": "alpha for focal loss"}
+    )
+    focal_trigger_token_ids: str = field(
+        default="",
+        metadata={"help": "trigger token ids for focal loss"}
+    )
+
 @dataclass
 class DPOArguments(DPOConfigTRL):
     cache_dir: Optional[str] = field(default=None)
