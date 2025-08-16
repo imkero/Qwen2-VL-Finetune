@@ -60,6 +60,10 @@ def configure_llm(model, training_args):
 from typing import List, Optional, Tuple, Dict
 import torch.nn.functional as F
 
+import torch
+import torch.nn.functional as F
+from typing import List, Optional, Tuple, Dict
+
 def focal_or_ce_causal_lm_loss(
     logits: torch.Tensor,                 # [B, T, V]
     labels: torch.Tensor,                 # [B, T]
@@ -68,70 +72,94 @@ def focal_or_ce_causal_lm_loss(
     gamma: float = 2.0,
     alpha: float = 0.25,
     ignore_index: int = -100,
-    label_smoothing_ce = 0.05,
-    label_smoothing_fl = 0.01,
+    label_smoothing_ce: float = 0.05,
+    label_smoothing_fl: float = 0.01,
     shift_labels: Optional[torch.Tensor] = None,
 ) -> torch.Tensor | Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
     若样本中（以 labels 视角）出现任一 trigger_token_id，则整条样本使用 Focal；
-    否则使用 CE。
+    否则使用 CE。显存优化版：
+      - 不 materialize [B,T,V] 的 log_softmax
+      - 仅在有效 token 上计算（通常远少于 B*T）
     """
-    logits = logits.float()
-
-    # 1) 右移标签
+    # ---- 1) 右移标签（避免 pad 产生 [B,T+1] 的临时张量） ----
     if shift_labels is None:
-        labels_pad = F.pad(labels, (0, 1), value=ignore_index)
-        shift_labels = labels_pad[..., 1:].contiguous()
+        shift_labels = labels.new_full(labels.shape, ignore_index)
+        shift_labels[..., :-1] = labels[..., 1:]  # 等价于 pad+slice
 
-    B, T, _ = logits.shape
+    B, T, V = logits.shape
     assert shift_labels.shape == (B, T)
 
-    # 2) 样本级触发判定（labels 中是否出现任一触发 token）
-    #    注意：我们只在 labels 非 -100 的位置才会计入损失（本数据仅答案首 token 有效）
-    trig_mask_list = [(labels == tid).any(dim=-1) for tid in trigger_token_ids]  # each [B]
-    use_focal_seq = trig_mask_list[0].clone()
-    for m in trig_mask_list[1:]:
-        use_focal_seq |= m                                            # [B]
+    # ---- 2) 样本级触发判定（以 labels 为准） ----
+    #    注：ignore_index != 任意 trigger id，因此无需额外排除
+    trig_ids = torch.tensor(trigger_token_ids, device=labels.device, dtype=labels.dtype)
+    use_focal_seq = torch.isin(labels, trig_ids).any(dim=-1)    # [B], True=用Focal
 
-    # 3) 一次性得到真类 log 概率与 NLL
-    log_probs = F.log_softmax(logits, dim=-1)                         # [B, T, V]
-    valid_mask = shift_labels.ne(ignore_index)                        # [B, T]
-    gather_idx = shift_labels.clamp_min(0).unsqueeze(-1)              # [B, T, 1]
-    log_pt = log_probs.gather(dim=-1, index=gather_idx).squeeze(-1)   # [B, T]
-    nll = -log_pt                                                     # 逐 token CE
+    # ---- 3) 仅挑出有效 token 行，避免在 [B,T,V] 上全量计算 ----
+    valid_mask = shift_labels.ne(ignore_index)                  # [B, T]
+    if not torch.any(valid_mask):
+        # 与原实现一致：没有有效位时返回 0（或按 num_items_in_batch 归一）
+        return logits.new_tensor(0.0, dtype=logits.dtype, requires_grad=True)
 
-    # 4) Focal（逐 token）
-    pt = torch.exp(log_pt)
+    # 展平选择有效行
+    flat_valid = valid_mask.view(-1)                            # [B*T]
+    logits_flat = logits.view(-1, V)                            # [B*T, V]
+    targets_flat = shift_labels.view(-1)                        # [B*T]
 
-    if label_smoothing_ce > 0 or label_smoothing_fl > 0:
-        mean_log_probs = log_probs.mean(dim=-1)                           # [B, T]
-    
-    if label_smoothing_ce > 0:
-        ce_loss = (1.0 - label_smoothing_ce) * nll + label_smoothing_ce * (-mean_log_probs)  # 平滑后的 CE 逐 token
+    logits_valid = logits_flat[flat_valid]                      # [N_valid, V]
+    targets_valid = targets_flat[flat_valid].long()             # [N_valid]
+    N_valid = targets_valid.numel()
+
+    # 记录每个有效 token 属于哪个样本（用于样本级选择 focal/ce）
+    batch_ids = torch.arange(B, device=logits.device).unsqueeze(1).expand(B, T).reshape(-1)[flat_valid]  # [N_valid]
+    use_focal_each = use_focal_seq[batch_ids]                   # [N_valid] bool
+
+    # ---- 4) 一次性得到真类 log 概率与 NLL（不构造 log_probs）----
+    # logsumexp：s = log(Σ_j exp(logits_j))
+    s = torch.logsumexp(logits_valid.float(), dim=-1).to(logits_valid.dtype)                   # [N_valid]
+    # 真类 logit
+    true_logits = logits_valid.gather(1, targets_valid.unsqueeze(1)).squeeze(1)  # [N_valid]
+    log_pt = true_logits - s                                    # [N_valid]
+    nll = -log_pt                                               # 逐 token CE
+
+    # 为平滑项准备 mean_log_probs = mean(logits) - s
+    use_ce_smooth = label_smoothing_ce > 0.0
+    use_fl_smooth = label_smoothing_fl > 0.0
+    if use_ce_smooth or use_fl_smooth:
+        mean_logits = logits_valid.mean(dim=-1)                 # [N_valid]
+        # -mean_log_probs = s - mean_logits
+        neg_mean_log_probs = s - mean_logits                    # [N_valid]
+
+    # ---- 5) CE 与 Focal（逐 token，仅在有效位上）----
+    # CE
+    if use_ce_smooth:
+        ce_loss_valid = (1.0 - label_smoothing_ce) * nll + label_smoothing_ce * neg_mean_log_probs
     else:
-        ce_loss = nll
+        ce_loss_valid = nll
 
-    focal_factor = alpha * (1.0 - pt).pow(gamma)                      # [B, T]
-    if label_smoothing_fl > 0:
-        fl_loss = focal_factor * ((1.0 - label_smoothing_fl) * nll) + label_smoothing_fl * (-mean_log_probs)
+    # Focal
+    pt = torch.exp(log_pt)                                      # [N_valid], 0..1
+    focal_factor = alpha * (1.0 - pt).pow(gamma)                # [N_valid]
+    if use_fl_smooth:
+        # 与原实现保持一致：仅对 nll 部分乘 focal_factor，平滑的均值项不乘
+        fl_loss_valid = focal_factor * ((1.0 - label_smoothing_fl) * nll) + label_smoothing_fl * neg_mean_log_probs
     else:
-        fl_loss = focal_factor * nll
+        fl_loss_valid = focal_factor * nll
 
-    # 5) 样本级选择 Focal/CE（再乘 valid_mask 仅保留有效 label 位）
-    use_focal_mask = use_focal_seq.unsqueeze(-1).expand_as(valid_mask)  # [B, T]
-    per_token_loss = torch.where(use_focal_mask, fl_loss, ce_loss)
-    per_token_loss = per_token_loss * valid_mask
+    # 样本级选择 focal/ce
+    per_token_loss_valid = torch.where(use_focal_each, fl_loss_valid, ce_loss_valid)  # [N_valid]
 
-    # 6) 归约与规范化
+    # ---- 6) 归约与规范化 ----
     if num_items_in_batch is not None:
         if torch.is_tensor(num_items_in_batch):
-            num_items_in_batch = num_items_in_batch.to(per_token_loss.device)
-        loss = per_token_loss.sum() / num_items_in_batch
+            num_items_in_batch = num_items_in_batch.to(per_token_loss_valid.device)
+        loss = per_token_loss_valid.sum() / num_items_in_batch
     else:
-        denom = valid_mask.sum().clamp_min(1).to(per_token_loss.dtype)
-        loss = per_token_loss.sum() / denom
+        denom = torch.tensor(N_valid, device=per_token_loss_valid.device, dtype=per_token_loss_valid.dtype).clamp_min(1)
+        loss = per_token_loss_valid.sum() / denom
 
     return loss
+
 
 class FocalOrCETrainer(QwenSFTTrainer):
     def __init__(
