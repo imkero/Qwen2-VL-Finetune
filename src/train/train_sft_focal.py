@@ -140,12 +140,12 @@ class FocalOrCETrainer(QwenSFTTrainer):
         ignore_index: int = -100,
         **kwargs,
     ):
-        args = kwargs["args"]
-        self._trigger_token_ids = [int(tok) for tok in args.focal_trigger_token_ids.split(',')]
-        self._focal_gamma = args.focal_gamma
-        self._focal_alpha = args.focal_alpha
-        self._label_smoothing_ce = args.label_smoothing_ce
-        self._label_smoothing_fl = args.label_smoothing_fl
+        training_args = kwargs["args"]
+        self._trigger_token_ids = [int(tok) for tok in training_args.focal_trigger_token_ids.split(',')]
+        self._focal_gamma = training_args.focal_gamma
+        self._focal_alpha = training_args.focal_alpha
+        self._label_smoothing_ce = training_args.label_smoothing_ce
+        self._label_smoothing_fl = training_args.label_smoothing_fl
         self._ignore_index = ignore_index
         super().__init__(*args, compute_loss_func=self._compute_loss_func, ignore_index=ignore_index, **kwargs)
 
