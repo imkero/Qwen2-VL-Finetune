@@ -147,7 +147,7 @@ class FocalOrCETrainer(QwenSFTTrainer):
         self._label_smoothing_ce = training_args.label_smoothing_ce
         self._label_smoothing_fl = training_args.label_smoothing_fl
         self._ignore_index = ignore_index
-        super().__init__(*args, compute_loss_func=self._compute_loss_func, ignore_index=ignore_index, **kwargs)
+        super().__init__(*args, compute_loss_func=self._compute_loss_func, **kwargs)
 
     def _compute_loss_func(
         self,
