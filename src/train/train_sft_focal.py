@@ -140,7 +140,7 @@ class FocalOrCETrainer(QwenSFTTrainer):
         ignore_index: int = -100,
         **kwargs,
     ):
-        args = kwargs.args
+        args = kwargs["args"]
         self._trigger_token_ids = [int(tok) for tok in args.focal_trigger_token_ids.split(',')]
         self._focal_gamma = args.focal_gamma
         self._focal_alpha = args.focal_alpha
