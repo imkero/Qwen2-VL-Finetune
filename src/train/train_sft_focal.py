@@ -68,6 +68,7 @@ def focal_or_ce_causal_lm_loss(
     logits: torch.Tensor,                 # [B, T, V]
     labels: torch.Tensor,                 # [B, T]
     trigger_token_ids: List[int],         # 触发 Focal 的单 token 列表（如 yes/no）
+    no_smooth_token_ids: List[int] = None,
     num_items_in_batch: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
     alpha: float = 0.25,
@@ -130,19 +131,28 @@ def focal_or_ce_causal_lm_loss(
         # -mean_log_probs = s - mean_logits
         neg_mean_log_probs = s - mean_logits                    # [N_valid]
 
-    # ---- 5) CE 与 Focal（逐 token，仅在有效位上）----
-    # CE
+    # <<< 新增：构造“哪些 token 不做平滑”的掩码（在有效位上）
+    if no_smooth_token_ids:
+        ns_ids = torch.tensor(no_smooth_token_ids, device=targets_valid.device, dtype=targets_valid.dtype)
+        no_smooth_mask = torch.isin(targets_valid, ns_ids)          # [N_valid] bool
+    else:
+        no_smooth_mask = torch.zeros_like(targets_valid, dtype=torch.bool)
+
+    no_smooth_mask = no_smooth_mask.to(nll.dtype)               # [N_valid]
+
+    # 将标量平滑系数变为逐 token 系数：指定 token 处为 0，其余为原值
+    # 注：保持与你原实现一致的公式；FL 的均值项仍不乘 focal_factor。
     if use_ce_smooth:
-        ce_loss_valid = (1.0 - label_smoothing_ce) * nll + label_smoothing_ce * neg_mean_log_probs
+        ce_eps = (1.0 - no_smooth_mask) * label_smoothing_ce     # [N_valid]
+        ce_loss_valid = (1.0 - ce_eps) * nll + ce_eps * neg_mean_log_probs
     else:
         ce_loss_valid = nll
 
-    # Focal
-    pt = torch.exp(log_pt)                                      # [N_valid], 0..1
-    focal_factor = alpha * (1.0 - pt).pow(gamma)                # [N_valid]
+    pt = torch.exp(log_pt)
+    focal_factor = alpha * (1.0 - pt).pow(gamma)                    # [N_valid]
     if use_fl_smooth:
-        # 与原实现保持一致：仅对 nll 部分乘 focal_factor，平滑的均值项不乘
-        fl_loss_valid = focal_factor * ((1.0 - label_smoothing_fl) * nll) + label_smoothing_fl * neg_mean_log_probs
+        fl_eps = (1.0 - no_smooth_mask) * label_smoothing_fl     # [N_valid]
+        fl_loss_valid = focal_factor * ((1.0 - fl_eps) * nll) + fl_eps * neg_mean_log_probs
     else:
         fl_loss_valid = focal_factor * nll
 
@@ -169,7 +179,17 @@ class FocalOrCETrainer(QwenSFTTrainer):
         **kwargs,
     ):
         training_args = kwargs["args"]
-        self._trigger_token_ids = [int(tok) for tok in training_args.focal_trigger_token_ids.split(',')]
+
+        if training_args.focal_trigger_token_ids:
+            self._trigger_token_ids = [int(tok) for tok in training_args.focal_trigger_token_ids.split(',')]
+        else:
+            self._trigger_token_ids = []
+
+        if training_args.no_smooth_token_ids:
+            self._no_smooth_token_ids = [int(tok) for tok in training_args.no_smooth_token_ids.split(',')]
+        else:
+            self._no_smooth_token_ids = []
+
         self._focal_gamma = training_args.focal_gamma
         self._focal_alpha = training_args.focal_alpha
         self._label_smoothing_ce = training_args.label_smoothing_ce
@@ -188,6 +208,7 @@ class FocalOrCETrainer(QwenSFTTrainer):
             logits=outputs["logits"],
             labels=labels,
             trigger_token_ids=self._trigger_token_ids,
+            no_smooth_token_ids=self._no_smooth_token_ids,
             num_items_in_batch=num_items_in_batch,
             gamma=self._focal_gamma,
             alpha=self._focal_alpha,

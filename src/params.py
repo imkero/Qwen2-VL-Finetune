@@ -158,6 +158,11 @@ class TrainingArguments(HFTrainingArguments):
         metadata={"help": "trigger token ids for focal loss"}
     )
 
+    no_smooth_token_ids: str = field(
+        default="",
+        metadata={"help": "no smooth token ids for label smoothing"}
+    )
+
 @dataclass
 class DPOArguments(DPOConfigTRL):
     cache_dir: Optional[str] = field(default=None)
