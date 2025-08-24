@@ -171,12 +171,19 @@ def train():
 
     if training_args.lora_enable:
         lora_namespan_exclude = training_args.lora_namespan_exclude
+        init_lora_weights = True
+        if training_args.init_lora_weights == "zero":
+            init_lora_weights = False
+
+        # if init_lora_weights is False, lora_A is initialized to 0,
+        # lora_B is initialized to 0.
         peft_config = LoraConfig(
             r=training_args.lora_rank,
             lora_alpha=training_args.lora_alpha,
             target_modules=find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules),
             lora_dropout=training_args.lora_dropout,
-            bias=training_args.lora_bias
+            bias=training_args.lora_bias,
+            init_lora_weights=init_lora_weights,
         )
         if training_args.bits == 16:
             if training_args.bf16:

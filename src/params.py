@@ -208,6 +208,10 @@ class DPOArguments(DPOConfigTRL):
     lora_namespan_exclude: str = field(default=None, metadata={"help": "List of namespan to exclude for LoRA"})
     num_lora_modules: int = -1
     use_liger: bool = True
+    init_lora_weights: str = field(
+        default="default",
+        metadata={"help": "The initialization method for LoRA weights. Should be one of `default` or `zero`."}
+    )
     beta: float = field(
         default=0.1,
         metadata={"help": "The beta value for DPO."}
