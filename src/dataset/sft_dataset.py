@@ -91,6 +91,8 @@ class SupervisedDataset(Dataset):
             video_folder = self.data_args.image_folder
 
             video_fps = sources.get("fps", self.fps)
+            video_max_pixels = sources.get("video_max_pixels", self.video_max_pixel)
+            video_min_pixels = sources.get("video_min_pixels", self.video_min_pixel)
 
             if isinstance(video_files, str):
                 video_files = [video_files]
@@ -115,7 +117,7 @@ class SupervisedDataset(Dataset):
                 else:
                     video_file = process_video_item(video_file)
 
-                video_input, video_kwargs = get_video_info(video_file, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, video_fps, self.nframes)
+                video_input, video_kwargs = get_video_info(video_file, video_min_pixels, video_max_pixels, self.video_resized_w, self.video_resized_h, video_fps, self.nframes)
                 videos.append(video_input)
         else:
             grid_key = None
