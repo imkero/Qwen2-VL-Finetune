@@ -163,6 +163,11 @@ class TrainingArguments(HFTrainingArguments):
         metadata={"help": "no smooth token ids for label smoothing"}
     )
 
+    loss_weights_by_token: str = field(
+        default="",
+        metadata={"help": "loss weights by token, e.g. [[1,0.8],[2,0.7],[-1,1.0]]"}
+    )
+
 @dataclass
 class DPOArguments(DPOConfigTRL):
     cache_dir: Optional[str] = field(default=None)

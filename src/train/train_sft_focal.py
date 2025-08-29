@@ -68,6 +68,7 @@ def focal_or_ce_causal_lm_loss(
     logits: torch.Tensor,                 # [B, T, V]
     labels: torch.Tensor,                 # [B, T]
     trigger_token_ids: List[int],         # 触发 Focal 的单 token 列表（如 yes/no）
+    loss_weights_by_token: Optional[List[Tuple[int, float]]] = None, # 新增：按 token 触发的序列 loss 权重
     no_smooth_token_ids: List[int] = None,
     num_items_in_batch: Optional[torch.Tensor] = None,
     gamma: float = 2.0,
@@ -159,6 +160,40 @@ def focal_or_ce_causal_lm_loss(
     # 样本级选择 focal/ce
     per_token_loss_valid = torch.where(use_focal_each, fl_loss_valid, ce_loss_valid)  # [N_valid]
 
+    if loss_weights_by_token:
+        # 5.1) 解析规则，找到默认权重
+        default_weight = 1.0  # 如果不提供 (-1, val)，则默认为 1.0
+        for token_id, weight in loss_weights_by_token:
+            if token_id == -1:
+                default_weight = weight
+                break
+        
+        # 5.2) 为 batch 中每个序列计算其应有的权重
+        seq_weights = torch.full((B,), default_weight, device=logits.device, dtype=logits.dtype)
+        # 记录哪些序列已被更高优先级的规则匹配
+        assigned_mask = torch.zeros(B, dtype=torch.bool, device=logits.device)
+
+        # 按照列表顺序（优先级从高到低）进行匹配
+        for token_id, weight in loss_weights_by_token:
+            if token_id == -1:
+                continue
+            
+            # 找到包含当前 token 且尚未被分配权重的序列
+            # 注意：这里要用原始的 `labels` 进行判断
+            contains_token_mask = torch.isin(
+                labels, torch.tensor([token_id], device=labels.device)
+            ).any(dim=-1)
+            update_mask = contains_token_mask & ~assigned_mask
+            
+            # 更新这些序列的权重，并标记为已分配
+            seq_weights[update_mask] = weight
+            assigned_mask |= update_mask
+
+        # 5.3) 将序列权重应用到每个 token 的 loss 上
+        # 利用 batch_ids 将 [B] 的序列权重映射到 [N_valid] 的 token 权重
+        per_token_weights = seq_weights[batch_ids]
+        per_token_loss_valid = per_token_loss_valid * per_token_weights
+
     # ---- 6) 归约与规范化 ----
     if num_items_in_batch is not None:
         if torch.is_tensor(num_items_in_batch):
@@ -190,10 +225,17 @@ class FocalOrCETrainer(QwenSFTTrainer):
         else:
             self._no_smooth_token_ids = []
 
+        if training_args.loss_weights_by_token:
+            import json
+            self._loss_weights_by_token = json.loads(training_args.loss_weights_by_token)
+        else:
+            self._loss_weights_by_token = None
+
         self._focal_gamma = training_args.focal_gamma
         self._focal_alpha = training_args.focal_alpha
         self._label_smoothing_ce = training_args.label_smoothing_ce
         self._label_smoothing_fl = training_args.label_smoothing_fl
+
         self._ignore_index = ignore_index
         super().__init__(*args, compute_loss_func=self._compute_loss_func, **kwargs)
 
@@ -208,6 +250,7 @@ class FocalOrCETrainer(QwenSFTTrainer):
             logits=outputs["logits"],
             labels=labels,
             trigger_token_ids=self._trigger_token_ids,
+            loss_weights_by_token=self._loss_weights_by_token,
             no_smooth_token_ids=self._no_smooth_token_ids,
             num_items_in_batch=num_items_in_batch,
             gamma=self._focal_gamma,
