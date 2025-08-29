@@ -191,7 +191,6 @@ def focal_or_ce_causal_lm_loss(
 
         # 5.3) 将序列权重应用到每个 token 的 loss 上
         # 利用 batch_ids 将 [B] 的序列权重映射到 [N_valid] 的 token 权重
-        print("seq_weights", seq_weights)
         per_token_weights = seq_weights[batch_ids]
         per_token_loss_valid = per_token_loss_valid * per_token_weights
 
